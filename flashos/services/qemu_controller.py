@@ -5,7 +5,7 @@ import socket
 import subprocess
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QProcess, Signal
+from PySide6.QtCore import QObject, QProcess, QTimer, Signal
 
 
 class QemuController(QObject):
@@ -18,6 +18,10 @@ class QemuController(QObject):
         super().__init__(parent)
         self._process: QProcess | None = None
         self._qmp_port: int | None = None
+        self._kill_timer = QTimer(self)
+        self._kill_timer.setSingleShot(True)
+        self._kill_timer.setInterval(3000)
+        self._kill_timer.timeout.connect(self._kill_if_still_running)
 
     @property
     def running(self) -> bool:
@@ -91,6 +95,7 @@ class QemuController(QObject):
         if self.running and self._process is not None:
             self.state_changed.emit("Остановка процесса QEMU; возможно повреждение данных гостя")
             self._process.terminate()
+            self._kill_timer.start()
 
     def _read_output(self) -> None:
         if self._process is not None:
@@ -101,13 +106,23 @@ class QemuController(QObject):
     def _on_error(self, error: QProcess.ProcessError) -> None:
         if error != QProcess.ProcessError.Crashed:
             self.error_occurred.emit(f"Ошибка процесса QEMU: {error.name}")
+        if error == QProcess.ProcessError.FailedToStart:
+            self._process = None
+            self._qmp_port = None
+            self.finished.emit(-1, "не запущен")
 
     def _on_finished(self, exit_code: int, exit_status: QProcess.ExitStatus) -> None:
+        self._kill_timer.stop()
         status = "нормально" if exit_status == QProcess.ExitStatus.NormalExit else "аварийно"
         self.state_changed.emit(f"QEMU завершён ({status}, код {exit_code})")
         self.finished.emit(exit_code, status)
         self._process = None
         self._qmp_port = None
+
+    def _kill_if_still_running(self) -> None:
+        if self.running and self._process is not None:
+            self.state_changed.emit("QEMU не завершился после запроса; выполняется принудительное завершение")
+            self._process.kill()
 
     @staticmethod
     def _find_free_port() -> int:

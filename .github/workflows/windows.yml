@@ -1,4 +1,4 @@
-name: Windows validation
+name: Windows build
 
 on:
   push:
@@ -12,7 +12,18 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install dependency
-        run: python -m pip install -r requirements.txt
-      - name: Compile Python sources
+      - name: Install application and build dependencies
+        run: python -m pip install -r requirements.txt pyinstaller==6.22.3
+      - name: Check Python sources
         run: python -m compileall -q flashos app.py
+      - name: Build Windows application
+        run: python -m PyInstaller --noconfirm --clean --windowed --name FlashOS app.py
+      - name: Archive application
+        run: Compress-Archive -Path dist/FlashOS -DestinationPath dist/FlashOS-Windows.zip
+      - name: Upload downloadable application
+        uses: actions/upload-artifact@v4
+        with:
+          name: FlashOS-Windows
+          path: dist/FlashOS-Windows.zip
+          if-no-files-found: error
+          retention-days: 30
