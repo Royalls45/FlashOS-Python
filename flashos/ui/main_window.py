@@ -662,3 +662,72 @@ class MainWindow(QMainWindow):
             cpu_count=self.cpu_spin.value(),
             last_iso=str(self.selected_iso or ""),
             last_drive=str(self.selected_device.root) if self.selected_device else "",
+        )
+        try:
+            self.config_store.save(settings)
+            self.settings = settings
+        except OSError as exc:
+            self._log("Настройки", f"Не удалось сохранить параметры: {exc}")
+
+    def _export_log(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(self, "Экспорт журнала", "flashos-log.txt", "Текстовые файлы (*.txt)")
+        if path:
+            try:
+                Path(path).write_text(self.log_view.toPlainText(), encoding="utf-8")
+                self._log("Журнал", "Диагностический журнал экспортирован.")
+            except OSError as exc:
+                QMessageBox.warning(self, "Экспорт журнала", str(exc))
+
+    def _log(self, category: str, message: str) -> None:
+        from datetime import datetime
+
+        safe = redact_sensitive_paths(message)
+        for line in safe.splitlines() or [""]:
+            self.log_view.appendPlainText(f"{datetime.now():%H:%M:%S}  {category}  {line}")
+
+    def _clear_scan_results(self) -> None:
+        self.files = []
+        self.selected_iso = None
+        self.selected_persistence_backend = None
+        self.file_table.setRowCount(0)
+        self.persistence_table.setRowCount(0)
+        self.script_preview.clear()
+        self.selected_iso_label.setText("Сначала выберите ISO в списке.")
+        self.persistence_label.setText("Выберите том для анализа.")
+        self._set_persistence_mode_available(False)
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        if self.vm.running:
+            QMessageBox.warning(
+                self, "QEMU запущен",
+                "Сначала завершите гостевую систему штатно или используйте отдельную команду остановки.",
+            )
+            event.ignore()
+            return
+        if self._scan_cancel is not None:
+            self._scan_cancel.set()
+        if self._scan_thread is not None:
+            self._scan_thread.quit()
+            self._scan_thread.wait(3000)
+        self._save_settings()
+        event.accept()
+
+
+DARK_STYLE = """
+QWidget { background: #101319; color: #edf1f7; font-family: 'Segoe UI'; font-size: 10pt; }
+QLabel#title { font-size: 25pt; font-weight: 650; }
+QLabel#muted { color: #9aa6b7; }
+QLabel#panelTitle { font-size: 13pt; font-weight: 600; padding-bottom: 5px; }
+QLabel#banner { background: #17202b; color: #c8d7f5; border: 1px solid #33445b; border-radius: 7px; padding: 11px; }
+QFrame#panel { background: #191e27; border: 1px solid #2b3340; border-radius: 8px; padding: 8px; }
+QPushButton { background: #34466f; color: white; border: 1px solid #526ba5; border-radius: 5px; padding: 8px 13px; }
+QPushButton:hover { background: #405989; }
+QPushButton:disabled { background: #222832; color: #728096; border-color: #303947; }
+QLineEdit, QSpinBox, QComboBox, QPlainTextEdit, QListWidget, QTableWidget { background: #151a22; border: 1px solid #303947; border-radius: 4px; padding: 5px; selection-background-color: #34466f; }
+QHeaderView::section { background: #222a36; color: #d7dfeb; border: none; padding: 7px; font-weight: 600; }
+QTableWidget { gridline-color: #2b3340; alternate-background-color: #1d232d; }
+QTabWidget::pane { border: 1px solid #2b3340; border-radius: 6px; background: #191e27; }
+QTabBar::tab { background: #151a22; color: #9aa6b7; padding: 10px 18px; border-bottom: 2px solid transparent; }
+QTabBar::tab:selected { color: white; background: #202b3b; border-bottom-color: #7c9cff; }
+QSplitter::handle { background: #2b3340; }
+"""
