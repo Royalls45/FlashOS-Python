@@ -76,8 +76,16 @@ class PersistenceManager:
                     if path is None or not path.is_file():
                         continue
                     label = self._ext_filesystem_label(path)
+                    if not label or label.casefold() != "casper-rw":
+                        return CompatibilityResult(
+                            "Метка backend не подходит",
+                            f"Для экспериментального Casper-запуска требуется ext filesystem с меткой casper-rw; обнаружено: {label or 'не распознана'}.",
+                        )
                     detail = f"ISO и backend указаны вместе; метка {label or 'не распознана'}. Сохранение после перезапуска ещё не проверено."
-                    return CompatibilityResult("Кандидат найден, не проверено", detail, supported=False)
+                    return CompatibilityResult(
+                        "Кандидат найден, не проверено", detail,
+                        supported=False, backend_path=path,
+                    )
                 return CompatibilityResult("Backend не найден", "Конфигурация ссылается на backend, которого нет на томе.")
         return CompatibilityResult("Не подтверждено", "Нет точной записи, связывающей выбранный ISO с backend.")
 

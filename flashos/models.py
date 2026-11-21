@@ -47,6 +47,7 @@ class CompatibilityResult:
     status: str
     details: str
     supported: bool = False
+    backend_path: Path | None = None
 
 
 def format_bytes(value: int) -> str:

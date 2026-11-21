@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
 from flashos.models import CompatibilityResult, DiskInfo, DiscoveredFile, PersistenceReport, format_bytes
 from flashos.services.config_store import AppSettings, ConfigStore
 from flashos.services.file_scanner import FileScanner, ScanCancelled
+from flashos.services.iso_boot_assets import IsoBootAssetExtractor
 from flashos.services.logging_service import redact_sensitive_paths
 from flashos.services.persistence_manager import PersistenceManager
 from flashos.services.qemu_controller import QemuController
@@ -81,6 +82,26 @@ class ProbeTask(QRunnable):
             self.signals.finished.emit(self.executable, None, str(exc))
 
 
+class BootAssetSignals(QObject):
+    finished = Signal(str, str, object, str)
+
+
+class BootAssetTask(QRunnable):
+    def __init__(self, iso_path: str, backend_path: str) -> None:
+        super().__init__()
+        self.iso_path = iso_path
+        self.backend_path = backend_path
+        self.signals = BootAssetSignals()
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            assets = IsoBootAssetExtractor().extract(Path(self.iso_path))
+            self.signals.finished.emit(self.iso_path, self.backend_path, assets, "")
+        except Exception as exc:
+            self.signals.finished.emit(self.iso_path, self.backend_path, None, str(exc))
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -95,10 +116,12 @@ class MainWindow(QMainWindow):
         self.files: list[DiscoveredFile] = []
         self.selected_device: DiskInfo | None = None
         self.selected_iso: Path | None = None
+        self.selected_persistence_backend: Path | None = None
         self._scan_thread: QThread | None = None
         self._scan_worker: ScanWorker | None = None
         self._scan_cancel: Event | None = None
         self._probe_task: ProbeTask | None = None
+        self._boot_task: BootAssetTask | None = None
         self._qemu_version = ""
         self.vm = QemuController(self)
         self.vm.state_changed.connect(self._on_vm_state)
@@ -133,7 +156,7 @@ class MainWindow(QMainWindow):
         root.addLayout(header)
 
         banner = QLabel(
-            "Обычный запуск ISO не обещает сохранение данных. Совместимость Persistence показывается отдельно и требует повторного запуска для подтверждения."
+            "Persistence в QEMU доступна только как экспериментальный режим: изменения записываются в backend на флешке, совместимость не подтверждена."
         )
         banner.setObjectName("banner")
         banner.setWordWrap(True)
@@ -269,12 +292,14 @@ class MainWindow(QMainWindow):
         settings_row.addStretch(1)
         form.addRow("Ресурсы", settings_row)
 
-        mode = QComboBox()
-        mode.addItem("Live ISO — Persistence не включено", userData="live")
-        mode.addItem("Live Persistence — не подтверждено для запуска QEMU", userData="unverified")
-        mode.setItemData(1, 0, Qt.ItemDataRole.UserRole - 1)
-        mode.setToolTip("Обычный запуск доступен. Persistence не включается, пока комбинация не пройдёт контрольный тест.")
-        form.addRow("Режим", mode)
+        self.mode = QComboBox()
+        self.mode.addItem("Live ISO — без Persistence", userData="live")
+        self.mode.addItem("Persistence в QEMU — экспериментально", userData="persistence")
+        mode_item = self.mode.model().item(1)
+        if mode_item is not None:
+            mode_item.setEnabled(False)
+        self.mode.setToolTip("Экспериментальный режим записи в persistence.dat. Совместимость не проверена.")
+        form.addRow("Режим", self.mode)
 
         actions = QHBoxLayout()
         self.start_vm_button = QPushButton("Запустить выбранный ISO")
@@ -442,8 +467,10 @@ class MainWindow(QMainWindow):
                     item.setData(Qt.ItemDataRole.UserRole, found.path)
                 self.file_table.setItem(row, column, item)
         self.selected_iso = None
+        self.selected_persistence_backend = None
         self.selected_iso_label.setText("Сначала выберите ISO в списке.")
-        self.start_vm_button.setEnabled(bool(self._qemu_version))
+        self._set_persistence_mode_available(False)
+        self.start_vm_button.setEnabled(bool(self._qemu_version and self.selected_iso))
 
     def _populate_persistence(self, reports: list[PersistenceReport]) -> None:
         self.persistence_table.setRowCount(0)
@@ -463,15 +490,26 @@ class MainWindow(QMainWindow):
         item = self.files[row]
         if item.kind != "ISO-образ":
             self.selected_iso = None
+            self.selected_persistence_backend = None
+            self._set_persistence_mode_available(False)
             self.selected_iso_label.setText("Выбранный файл не является ISO-образом.")
             self.start_vm_button.setEnabled(False)
             return
         self.selected_iso = item.path
         self.selected_iso_label.setText(f"Выбран ISO: {item.path} · {item.size_text}")
         result = self.persistence_manager.compatibility_for(self.selected_device.root, item.path, self.files) if self.selected_device else CompatibilityResult("Не проверено", "Выберите USB-том.")
+        self.selected_persistence_backend = result.backend_path
+        self._set_persistence_mode_available(self.selected_persistence_backend is not None)
         self.persistence_label.setText(f"{result.status}. {result.details}")
         self.start_vm_button.setEnabled(bool(self._qemu_version))
         self._save_settings()
+
+    def _set_persistence_mode_available(self, available: bool) -> None:
+        item = self.mode.model().item(1)
+        if item is not None:
+            item.setEnabled(available)
+        if not available:
+            self.mode.setCurrentIndex(0)
 
     def _browse_qemu(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Выберите QEMU", "", "QEMU (qemu-system-x86_64.exe)")
@@ -510,6 +548,64 @@ class MainWindow(QMainWindow):
         if self.selected_iso is None:
             QMessageBox.information(self, "ISO не выбран", "Выберите ISO-образ на вкладке «Обзор».")
             return
+        if self.mode.currentData() == "persistence":
+            if self.selected_persistence_backend is None:
+                QMessageBox.warning(self, "Persistence недоступна", "Для выбранного ISO не найден подходящий backend.")
+                return
+            answer = QMessageBox.warning(
+                self,
+                "Экспериментальная Persistence",
+                "QEMU будет записывать изменения прямо в persistence.dat на флешке. Совместимость с этим ISO не проверена. "
+                "Если выключить компьютер, выдернуть флешку или принудительно остановить QEMU, backend может повредиться. Продолжить?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            task = BootAssetTask(str(self.selected_iso), str(self.selected_persistence_backend))
+            self._boot_task = task
+            task.signals.finished.connect(self._on_persistence_assets_ready)
+            self.start_vm_button.setEnabled(False)
+            self.mode.setEnabled(False)
+            self.status_label.setText("Извлечение kernel/initrd из ISO для экспериментального режима…")
+            self._log("Persistence", "Подготавливаются загрузочные файлы; ISO читается, backend пока не открыт QEMU.")
+            QThreadPool.globalInstance().start(task)
+            return
+        self._launch_vm()
+
+    def _on_persistence_assets_ready(self, iso_path: str, backend_path: str, assets: object, error: str) -> None:
+        self._boot_task = None
+        self.mode.setEnabled(True)
+        if error:
+            self.start_vm_button.setEnabled(bool(self._qemu_version and self.selected_iso))
+            self.status_label.setText("Не удалось подготовить экспериментальную Persistence-загрузку.")
+            QMessageBox.critical(self, "Persistence", error)
+            self._log("Ошибка Persistence", error)
+            return
+        if (
+            self.selected_iso is None
+            or self.selected_iso.resolve() != Path(iso_path).resolve()
+            or self.selected_persistence_backend is None
+            or self.selected_persistence_backend.resolve() != Path(backend_path).resolve()
+        ):
+            self.start_vm_button.setEnabled(bool(self._qemu_version and self.selected_iso))
+            return
+        try:
+            self.vm.start_iso(
+                self.qemu_path.text().strip(), iso_path,
+                self.memory_spin.value(), self.cpu_spin.value(),
+                persistence_backend=backend_path,
+                kernel_path=str(assets.kernel),
+                initrd_path=str(assets.initrd),
+            )
+            self._set_vm_controls(True)
+            self.tabs.setCurrentIndex(1)
+            self._log("Persistence", f"Экспериментальный запуск; backend будет изменяться: {backend_path}.")
+        except Exception as exc:
+            QMessageBox.critical(self, "Не удалось запустить QEMU", str(exc))
+            self._log("Ошибка QEMU", str(exc))
+
+    def _launch_vm(self) -> None:
         try:
             self.vm.start_iso(
                 self.qemu_path.text().strip(), str(self.selected_iso),
@@ -566,70 +662,3 @@ class MainWindow(QMainWindow):
             cpu_count=self.cpu_spin.value(),
             last_iso=str(self.selected_iso or ""),
             last_drive=str(self.selected_device.root) if self.selected_device else "",
-        )
-        try:
-            self.config_store.save(settings)
-            self.settings = settings
-        except OSError as exc:
-            self._log("Настройки", f"Не удалось сохранить параметры: {exc}")
-
-    def _export_log(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(self, "Экспорт журнала", "flashos-log.txt", "Текстовые файлы (*.txt)")
-        if path:
-            try:
-                Path(path).write_text(self.log_view.toPlainText(), encoding="utf-8")
-                self._log("Журнал", "Диагностический журнал экспортирован.")
-            except OSError as exc:
-                QMessageBox.warning(self, "Экспорт журнала", str(exc))
-
-    def _log(self, category: str, message: str) -> None:
-        from datetime import datetime
-
-        safe = redact_sensitive_paths(message)
-        for line in safe.splitlines() or [""]:
-            self.log_view.appendPlainText(f"{datetime.now():%H:%M:%S}  {category}  {line}")
-
-    def _clear_scan_results(self) -> None:
-        self.files = []
-        self.selected_iso = None
-        self.file_table.setRowCount(0)
-        self.persistence_table.setRowCount(0)
-        self.script_preview.clear()
-        self.selected_iso_label.setText("Сначала выберите ISO в списке.")
-        self.persistence_label.setText("Выберите том для анализа.")
-
-    def closeEvent(self, event: QCloseEvent) -> None:
-        if self.vm.running:
-            QMessageBox.warning(
-                self, "QEMU запущен",
-                "Сначала завершите гостевую систему штатно или используйте отдельную команду остановки.",
-            )
-            event.ignore()
-            return
-        if self._scan_cancel is not None:
-            self._scan_cancel.set()
-        if self._scan_thread is not None:
-            self._scan_thread.quit()
-            self._scan_thread.wait(3000)
-        self._save_settings()
-        event.accept()
-
-
-DARK_STYLE = """
-QWidget { background: #101319; color: #edf1f7; font-family: 'Segoe UI'; font-size: 10pt; }
-QLabel#title { font-size: 25pt; font-weight: 650; }
-QLabel#muted { color: #9aa6b7; }
-QLabel#panelTitle { font-size: 13pt; font-weight: 600; padding-bottom: 5px; }
-QLabel#banner { background: #17202b; color: #c8d7f5; border: 1px solid #33445b; border-radius: 7px; padding: 11px; }
-QFrame#panel { background: #191e27; border: 1px solid #2b3340; border-radius: 8px; padding: 8px; }
-QPushButton { background: #34466f; color: white; border: 1px solid #526ba5; border-radius: 5px; padding: 8px 13px; }
-QPushButton:hover { background: #405989; }
-QPushButton:disabled { background: #222832; color: #728096; border-color: #303947; }
-QLineEdit, QSpinBox, QComboBox, QPlainTextEdit, QListWidget, QTableWidget { background: #151a22; border: 1px solid #303947; border-radius: 4px; padding: 5px; selection-background-color: #34466f; }
-QHeaderView::section { background: #222a36; color: #d7dfeb; border: none; padding: 7px; font-weight: 600; }
-QTableWidget { gridline-color: #2b3340; alternate-background-color: #1d232d; }
-QTabWidget::pane { border: 1px solid #2b3340; border-radius: 6px; background: #191e27; }
-QTabBar::tab { background: #151a22; color: #9aa6b7; padding: 10px 18px; border-bottom: 2px solid transparent; }
-QTabBar::tab:selected { color: white; background: #202b3b; border-bottom-color: #7c9cff; }
-QSplitter::handle { background: #2b3340; }
-"""

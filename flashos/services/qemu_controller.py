@@ -41,7 +41,16 @@ class QemuController(QObject):
             raise RuntimeError(f"QEMU не прошёл проверку: {output or result.returncode}")
         return output.splitlines()[0]
 
-    def start_iso(self, executable: str, iso_path: str, memory_mb: int, cpu_count: int) -> None:
+    def start_iso(
+        self,
+        executable: str,
+        iso_path: str,
+        memory_mb: int,
+        cpu_count: int,
+        persistence_backend: str | None = None,
+        kernel_path: str | None = None,
+        initrd_path: str | None = None,
+    ) -> None:
         if self.running:
             raise RuntimeError("Виртуальная машина уже запущена.")
         qemu = Path(executable).resolve(strict=True)
@@ -56,12 +65,26 @@ class QemuController(QObject):
             raise ValueError("Число CPU должно быть в диапазоне 1–64.")
 
         self._qmp_port = self._find_free_port()
-        arguments = [
-            "-accel", "tcg", "-m", str(memory_mb), "-smp", str(cpu_count),
-            "-cdrom", str(iso), "-boot", "order=d", "-display", "sdl",
-            "-vga", "std", "-nic", "none", "-qmp",
+        arguments = ["-accel", "tcg", "-m", str(memory_mb), "-smp", str(cpu_count), "-cdrom", str(iso)]
+        if persistence_backend is None:
+            arguments.extend(["-boot", "order=d"])
+        else:
+            backend = Path(persistence_backend).resolve(strict=True)
+            kernel = Path(kernel_path or "").resolve(strict=True)
+            initrd = Path(initrd_path or "").resolve(strict=True)
+            if not backend.is_file() or backend.suffix.casefold() != ".dat":
+                raise ValueError("Persistence backend должен быть существующим файлом .dat.")
+            if not kernel.is_file() or not initrd.is_file():
+                raise ValueError("Для экспериментального запуска не найдены kernel/initrd ISO.")
+            arguments.extend([
+                "-kernel", str(kernel), "-initrd", str(initrd),
+                "-append", "boot=casper persistent quiet splash file=/cdrom/preseed/linuxmint.seed",
+                "-drive", f"file={backend},format=raw,if=virtio",
+            ])
+        arguments.extend([
+            "-display", "sdl", "-vga", "std", "-nic", "none", "-qmp",
             f"tcp:127.0.0.1:{self._qmp_port},server=on,wait=off",
-        ]
+        ])
         process = QProcess(self)
         process.setProgram(str(qemu))
         process.setArguments(arguments)

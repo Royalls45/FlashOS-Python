@@ -31,11 +31,11 @@ You can also install the package with `python -m pip install .` and launch it us
 - FlashOS scans only a selected ready volume, with limits on scan time, depth, and directory count.
 - `persistence.bat` is shown as text and is never executed.
 - Ventoy JSON paths are checked against the selected volume. A matching configuration or ext filesystem label is diagnostic evidence only.
-- The current QEMU launch uses the ISO as a read-only virtual CD-ROM with networking disabled. Live Persistence is deliberately not enabled: the full two-launch persistence check has not been completed.
+- QEMU offers an experimental Casper Persistence mode when Ventoy metadata points the selected ISO to an ext backend labeled `casper-rw`. It extracts the kernel/initrd from the ISO and attaches the `.dat` backend as a writable virtual disk. Compatibility has not been verified; the app warns before launch because an interrupted guest can damage the backend. Use normal Live mode if you do not want the USB backend modified.
 - FlashOS does not write to physical USB devices or pass a physical USB device through to QEMU.
 - VM launch uses QProcess arguments (no shell). The app offers a graceful guest shutdown request and warns before force-stopping QEMU.
 
 ## Build
 
-GitHub Actions installs Python 3.12, checks Python syntax, builds the Windows app with PyInstaller, and uploads a ZIP artifact.
+GitHub Actions installs Python 3.12, checks Python syntax, builds the Windows app with PyInstaller, and uploads a ZIP artifact. The Persistence path is not runtime-tested.
 
